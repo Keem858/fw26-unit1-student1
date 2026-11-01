@@ -1,9 +1,10 @@
 # server.py
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from client_stress_test import Client
 import queue
 import threading
+from protocol import *
+from storage import Storage
 
 HOST = "127.0.0.1"
 PORT = 9090
@@ -68,27 +69,51 @@ class Pool:
 
 
 # Routine for handling client connections
-def client_handler(client_socket, client_addr):
+def client_handler(client_socket, client_addr, storage):
     print(f"New connection from {client_addr}")
 
     # Management of worker thread <--> client connection
     with client_socket:
         try:
             while True:
-                data = client_socket.recv(1024)
-                if data:
-                    print(
-                        f"Received: {data.decode('utf-8', errors='replace')}")
-                    client_socket.sendall(data)  # Echo to the client
-                if not data:
-                    return
+                data = recv_message(client_socket)  # Defined in protocol
+                # Storage manipulation
+                if data["action"] == "PUT":
+                    storage.put(data["key"], data["value"])
+                    response = {"status": "OK"}
+                elif data["action"] == "GET":
+                    try:
+                        value = storage.get(data["key"])
+                        response = {"status": "OK", "value": value}
+                    except KeyError:
+                        response = {
+                            "status": "ERROR",
+                            "message": "Key not found"
+                        }
+                elif data["action"] == "ENQUEUE":
+                    storage.enqueue(data["value"])
+                    response = {"status": "OK"}
+                elif data["action"] == "DEQUEUE":
+                    response = {"status": "OK", "value": storage.dequeue()}
+                else:
+                    response = {
+                        "status": "ERROR",
+                        "message": "Unknown action"
+                    }
+                send_message(client_socket, response)
 
-        except OSError as exc:
-            print(f"Connection error with {client_addr}: {exc}")
+        except EOFError:
+            print(f"Connection closed by {client_addr}")
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"Request error with {client_addr}: {exc}")
 
 
 # Instantiating worker pool
 pool = Pool(MAX_WORKERS)
+
+
+# Instantiating storage
+storage = Storage()
 
 
 # Establishing connection to socket
@@ -97,17 +122,19 @@ server_socket.bind((HOST, PORT))
 server_socket.listen()
 
 
-# Iterative socket listening & handling
+# Iterative socket listening & handling (Dispatcher Thread)
 try:
     while True:
         client_socket, client_addr = server_socket.accept()
 
         # Dispatching thread from pool
-        pool.submit(client_handler, client_socket, client_addr)
+        pool.submit(client_handler, client_socket, client_addr, storage)
 
-except:
+except KeyboardInterrupt:
+    # Listens for "ctrl+c" keystroke and stops the server when it is pressed.
     print("\nShutting down server...")
 
 finally:
     server_socket.close()
     pool.shutdown()
+    print("Final storage: ", storage.print_data())
